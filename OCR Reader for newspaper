@@ -1,0 +1,112 @@
+import cv2
+import numpy as np
+import os
+from paddleocr import PaddleOCR
+
+# Initialize PaddleOCR
+ocr = PaddleOCR(use_angle_cls=True, lang="ch")
+
+# Update paths to match your system
+input_folder = r" " #Insert your folder path here
+output_folder = os.path.join(input_folder, "ocr_results")  # Save OCR results in a subfolder
+os.makedirs(output_folder, exist_ok=True)  # Ensure output folder exists
+
+# Image Processing Parameters
+ZOOM_FACTOR = 2.5  # 250% zoom for smaller text
+MIN_TEXT_SIZE = 5000  # Ignore very small text blocks
+
+# Function to enhance contrast & sharpness
+def enhance_image(image):
+    """Apply contrast enhancement, sharpening, and noise reduction."""
+    # Convert to grayscale
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+    # Apply adaptive histogram equalization (CLAHE)
+    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+    contrast_enhanced = clahe.apply(gray)
+
+    # Apply sharpening kernel
+    sharpen_kernel = np.array([[0, -1, 0],
+                               [-1, 5, -1],
+                               [0, -1, 0]])
+    sharpened = cv2.filter2D(contrast_enhanced, -1, sharpen_kernel)
+
+    return sharpened
+
+# Function to detect and extract text regions dynamically
+def detect_text_regions(image):
+    """Detects text regions using OpenCV contours and returns cropped text sections."""
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11, 2)
+
+    # Find contours of potential text areas
+    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    text_regions = []
+    for cnt in contours:
+        x, y, w, h = cv2.boundingRect(cnt)
+        if w * h > MIN_TEXT_SIZE:  # Ignore small noise
+            roi = image[y:y+h, x:x+w]
+            text_regions.append((x, y, w, h, roi))
+
+    return text_regions
+
+# Function to detect rotated text and correct orientation
+def correct_orientation(image):
+    """Detects if the text is vertical and rotates it before OCR processing."""
+    osd = pytesseract.image_to_osd(image, output_type=pytesseract.Output.DICT)
+    angle = osd["rotate"]
+
+    if angle in [90, 270]:  # If vertical, rotate to horizontal
+        image = cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE if angle == 90 else cv2.ROTATE_90_COUNTERCLOCKWISE)
+
+    return image
+
+# Function to process images in the folder
+def process_images():
+    for filename in os.listdir(input_folder):
+        if filename.lower().endswith((".jpg", ".png", ".jpeg")):
+            image_path = os.path.join(input_folder, filename)
+            image = cv2.imread(image_path)
+
+            if image is None:
+                print(f"Skipping {filename} (Invalid Image)")
+                continue
+
+            # Enhance image quality
+            processed_image = enhance_image(image)
+
+            # Detect text regions dynamically
+            text_regions = detect_text_regions(processed_image)
+
+            # Run OCR on detected regions
+            extracted_text = []
+            for idx, (x, y, w, h, roi) in enumerate(text_regions):
+                roi = correct_orientation(roi)  # Rotate if needed
+                h, w = roi.shape[:2]
+
+                # Zoom into small text for better OCR results
+                if h < 50:
+                    roi = cv2.resize(roi, (int(w * ZOOM_FACTOR), int(h * ZOOM_FACTOR)))
+
+                # Apply OCR
+                results = ocr.ocr(roi, cls=True)
+                text = "\n".join([word[1][0] for line in results for word in line])
+                extracted_text.append(f"--- Section {idx+1} ---\n{text}\n")
+
+                # Overlay detected text on image
+                cv2.rectangle(image, (x, y), (x + w, y + h), (0, 255, 0), 2)
+                cv2.putText(image, text[:15], (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+
+            # Save OCR results to a text file
+            output_text_file = os.path.join(output_folder, f"{filename}.txt")
+            with open(output_text_file, "w", encoding="utf-8") as f:
+                f.write("\n".join(extracted_text))
+
+            # Save image with text overlay
+            cv2.imwrite(os.path.join(output_folder, f"{filename}_overlay.jpg"), image)
+
+            print(f"OCR completed for {filename}. Results saved in {output_text_file}")
+
+# Run the OCR pipeline
+process_images()
